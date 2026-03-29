@@ -1,0 +1,431 @@
+---
+title: "Projekt"
+author: "Julia Kołat"
+date: "2026-03-01"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# 1. Dane
+
+Baza danych użytych w tym projekcie pochodzi ze strony <https://data.mendeley.com/datasets/>m482gb564t/1.
+
+Składa się z 981 obserwacji, które odpowiadają 477 pacjentom po zawale serca i 504 osobom bez zawału serca. Dane zbierano od stycznia 2020 do maja 2023, od osób, które trafiły na oddział kardiologiczny i spełniły kryteria Europejskiego Towarzystwa Kardiologicznego m.in. miały więcej niż 18 lat, nie cierpiały na przewlekłe infekcję, nie wykryto u nich nowotworu. Wiek i płeć pacjentów pozyskano z dokumentacji medycznej, natomiast wyniki badań krwi pochodzą z pierwszego badania po przybyciu na oddział ratunkowy.
+
+Baza danych składa się z następujących zmiennych:
+
+-    zmienna objaśniana: – AMI: zawał serca; 0 dla osoby zdrowej, 1 dla osoby po zawale serca;
+
+-   zmienne objaśniające: – SEX: płeć; 1 dla mężczyzny, 0 dla kobiety; – AGE: wiek; – WBC: white blood cell - białe krwinki; – RBC: red blood cell - czerwone krwinki; – HGB: hemoglobin - hemoglobina; – LY: lymphocyte - limfocyty; – MO: monocytes - monocyty.
+
+Celem jest jak najlepsze zaklasyfikowanie osób po zawale serca na podstawie badań krwi, co mogłoby w przyszłości pomóc w prognozowaniu zawału.
+
+# 2. Analiza
+
+Przejdźmy do analizy zbioru danych. Po wczytaniu danych, zmienne AMI oraz SEX z liczbowych zmieniamy na factor. Za pomocą funkcji summary sprawdzamy czy nie występują obserwacje odstające. Następnie, tworzymy wykresy punktowe dla każdej zmiennej. Widzimy, że wykres RBC/HGB jest zbliżony do liniowego, pozostałe przedstawiają chmury punktów. Gdy przeanalizujemy macierz korelacji, to możemy zauważyć, że największy współczynniki korelacji równy 0, 7 jest dla zmiennych RBC i HGB. Pozostałe współczynniki korelacji są znacząco mniejsze, co oznacza, że nie występuje zależność liniowa między zmiennymi.
+
+```{r include=FALSE}
+library(openxlsx)
+library(MASS)
+library(psych)
+library(klaR)
+library(tree)
+library(randomForest)
+library(gbm)
+library(BART)
+library(ggplot2)
+library(pROC)
+library(xgboost)
+library(caret)
+```
+
+```{r}
+#uporzadkowanie danych
+dane <- read.csv("C:/Users/Julia Kołat/Desktop/Studia/Sem 3,4/Julia Kołat Projekt SL/Baza danych Julia Kołat.csv")
+dane[,1] <- as.factor(dane[,1])
+dane[,2] <- as.factor(dane[,2])
+
+summary(dane)
+```
+
+```{r}
+#tworzymy wykresy punktowe dla wszystkich par zmiennych
+pairs(dane)
+
+lookup <- c('0'  = 'green', '1' = 'red')
+col.ind <- lookup[dane$AMI]
+pairs(dane, pch = 21, col = "gray", bg = col.ind)
+
+pairs.panels(dane,
+             gap = 0,
+             bg = c("red", "green")[dane$AMI],
+             pch = 21)
+
+#tworzymy macierz korelacji
+cor(dane[,3:8])
+
+```
+
+```{r}
+#tworzymy zbiór uczący
+set.seed(4)
+train_sample<- sample(981,819)
+test <- dane[-train_sample,]
+train <-dane[train_sample,]
+
+#sprawdzenie
+prop.table(table(dane$AMI))
+prop.table(table(test$AMI))
+prop.table(table(train$AMI))
+```
+
+# 3. Modele 
+
+Teraz zajmiemy się budowaniem modeli w celu prognozowania zbioru testowego.
+
+## 3.1. LDA 
+
+Pierwszym modelem jest linear discriminant analysis. Budujemy model. Jak pokazuje poniższy wykres, te dwie gęstości nachodzą na siebie, więc istnieje niepewność do której klasy zakwalifikować obserwacje.
+
+```{r}
+#LDA
+lda.fit <- lda(AMI ~ . , data = train)
+lda.fit
+#wykres gęstości
+plot(lda.fit)
+
+lda.pred <- predict(lda.fit, test)
+lda.class <- lda.pred$class
+
+```
+
+Tworzymy tablicę kontyngencji, która wygląda następująco:
+
+```{r}
+
+#tablica kontyngencji
+table(lda.class, test$AMI)
+#dokładność modelu
+mean(lda.class == test$AMI)
+```
+
+Interpretacja:
+
+-   74 to liczba obserwacji zakwalifikowanych przez model do klasy 0, gdy naprawdę obserwacje są z klasy 0. To poprawna klasyfikacja.
+
+-   27 to liczba obserwacji zakwalifikowanych przez model do klasy 1, gdy naprawdę obserwacje są z klasy 0. To nie jest poprawna klasyfikacja (false positives - fałszywie pozytywne).
+
+-   8 to liczba obserwacji zakwalifikowanych przez model do klasy 0, gdy naprawdę obserwacje są z klasy 1. To nie jest poprawna klasyfikacja (false negatives - fałszywie negatywne).
+
+-   53 to liczba obserwacji zakwalifikowanych przez model do klasy 1, gdy naprawdę obserwacje są z klasy 1. To poprawna klasyfikacja.
+
+Następnie obliczamy dokładność modelu, która wynosi 0.7840. Tworzymy krzywą ROC.
+
+```{r}
+# Uzyskiwanie prawdopodobieństw dla klasy "1" (pozytywnej)
+lda.prob <- lda.pred$posterior[, 2]
+dane.test.num <- as.numeric(as.character(test$AMI))
+# Dane do wykresu
+roc_obj <- roc(dane.test.num, lda.prob)
+roc_data <- data.frame(
+  TPR = roc_obj$sensitivities,   # True Positive Rate
+  FPR = 1 - roc_obj$specificities # False Positive Rate
+)
+
+# Rysowanie wykresu
+ggplot(roc_data, aes(x = FPR, y = TPR)) +
+  geom_line(color = "blue", linewidth = 1) +
+  geom_abline(linetype = "dashed", color = "red") +
+  labs(title = "Krzywa ROC LDA", x = "False Positive Rate (FPR)", y = "True Positive Rate (TPR)") +
+  theme_minimal()
+
+```
+
+Obliczamy AUC (pole pod wykresem ROC LDA):
+
+```{r}
+# Obliczenie AUC
+auc_value <- auc(roc_obj)
+print(paste("AUC (pole pod wykresem ROC LDA):", auc_value))
+```
+
+## 3.2. QDA 
+
+Kolejnym modelem jest quadratic discriminant analysis.
+
+```{r}
+#QDA
+qda.fit <- qda(AMI ~ ., data = train)
+qda.fit
+
+qda.pred <- predict(qda.fit, test)
+qda.class <- qda.pred$class
+```
+
+Budujemy model. Tworzymy tablicę kontyngencji. Prawidłowo zakwalifikował 126 obserwacji, a nieprawidłowo 36.
+
+```{r}
+#tablica kontyngencji
+table(qda.class, test$AMI)
+#dokładność modelu
+mean(qda.class == test$AMI)
+```
+
+Dokładność modelu wynosi: 0.7778. Tworzymy krzywą ROC.
+
+```{r}
+# Uzyskiwanie prawdopodobieństw dla klasy "1" (pozytywnej)
+qda.prob <- qda.pred$posterior[, 2]
+dane.test.num <- as.numeric(as.character(test$AMI))
+# Dane do wykresu
+roc_obj <- roc( dane.test.num, qda.prob )
+roc_data <- data.frame(
+  TPR = roc_obj$sensitivities,   # True Positive Rate
+  FPR = 1 - roc_obj$specificities # False Positive Rate
+)
+
+# Rysowanie wykresu
+ggplot(roc_data, aes(x = FPR, y = TPR)) +
+  geom_line(color = "blue", linewidth = 1) +
+  geom_abline(linetype = "dashed", color = "red") +
+  labs(title = "Krzywa ROC QDA", x = "False Positive Rate (FPR)", y = "True Positive Rate (TPR)") +
+  theme_minimal()
+```
+
+Obliczamy AUC (pole pod wykresem ROC QDA):
+
+```{r}
+# Obliczenie AUC
+auc_value <- auc(roc_obj)
+print(paste("AUC (pole pod wykresem ROC QDA):", auc_value))
+```
+
+## 3.3. LDA i QDA po normalizacji 
+
+Teraz znormalizujemy dane. Na podstawie zbioru uczącego obliczmy parametr lambda potrzebny do transformacji Boxa-Coxa, znormalizujemy dane w zbiorze uczącym, a następnie w zbiorze testowym. Dane po transformacji wprowadzamy do modelu LDA i QDA.
+
+```{r}
+#dla znormalizowanych danych
+lambda <- c()
+norm_train <- train
+norm_test <- test
+
+for (i in 4:8) {
+  bc <- boxcox(norm_train[,i]~ 1, plotit = FALSE)
+  lambda[i] <- bc$x[which.max(bc$y)]
+  for (j in 1:819) {
+    norm_train[j,i] <- ifelse(lambda[i]==0, log(norm_train[j,i]), (norm_train[j,i]^lambda[i]-1)/lambda[i]) 
+  }
+  shapiro.test(norm_train[,i])
+}
+
+
+for (i in 4:8) {
+  for (j in 1:162) {
+    norm_test[j,i] <- ifelse(lambda[i]==0, log(norm_test[j,i]), (norm_test[j,i]^lambda[i]-1)/lambda[i]) 
+  }
+}
+```
+
+```{r}
+#LDA
+lda.fit <- lda(AMI ~ ., data = norm_train)
+lda.fit
+plot(lda.fit)
+
+lda.pred <- predict(lda.fit, norm_test)
+lda.class <- lda.pred$class
+```
+
+Tablice kontyngencji: Model LDA prawidłowo zakwalifikował 119 obserwacji, a błędnie 43. Dokładność modelu LDA po normalizacji wynosi: 0.7346.
+
+```{r}
+#tablica kontyngencji
+table(lda.class, norm_test$AMI)
+#dokładność modelu
+mean(lda.class == norm_test$AMI)
+```
+
+```{r}
+# Uzyskiwanie prawdopodobieństw dla klasy "1" (pozytywnej)
+lda.prob <- lda.pred$posterior[, 2]
+dane.test.num <- as.numeric(as.character(test$AMI))
+# Dane do wykresu
+roc_obj <- roc( dane.test.num, lda.prob )
+roc_data <- data.frame(
+  TPR = roc_obj$sensitivities,   # True Positive Rate
+  FPR = 1 - roc_obj$specificities # False Positive Rate
+)
+
+# Rysowanie wykresu
+ggplot(roc_data, aes(x = FPR, y = TPR)) +
+  geom_line(color = "blue", linewidth = 1) +
+  geom_abline(linetype = "dashed", color = "red") +
+  labs(title = "Krzywa ROC LDA po normalizacji", x = "False Positive Rate (FPR)", y = "True Positive Rate (TPR)") +
+  theme_minimal()
+```
+
+AUC (pole pod wykresem ROC LDA po normalizacji): 0.8352.
+
+```{r}
+# Obliczenie AUC
+auc_value <- auc(roc_obj)
+print(paste("AUC (pole pod wykresem ROC LDA po normalizacji):", auc_value))
+```
+
+```{r}
+#QDA
+qda.fit <- qda(AMI ~ ., data = norm_train)
+qda.fit
+
+qda.pred <- predict(qda.fit, norm_test)
+qda.class <- qda.pred$class
+```
+
+Model QDA zakwalifikował 128 obserwacji, a błędnie 34. Natomiast dokładność modelu QDA po normalizacji wynosi: 0.7901.
+
+```{r}
+#tablica kontyngencji
+table(qda.class, norm_test$AMI)
+#dokładność modelu
+mean(qda.class == norm_test$AMI)
+```
+
+```{r}
+# Uzyskiwanie prawdopodobieństw dla klasy "1" (pozytywnej)
+qda.prob <- qda.pred$posterior[, 2]
+dane.test.num <- as.numeric(as.character(test$AMI))
+# Dane do wykresu
+roc_obj <- roc( dane.test.num, qda.prob )
+roc_data <- data.frame(
+  TPR = roc_obj$sensitivities,   # True Positive Rate
+  FPR = 1 - roc_obj$specificities # False Positive Rate
+)
+
+# Rysowanie wykresu
+ggplot(roc_data, aes(x = FPR, y = TPR)) +
+  geom_line(color = "blue", linewidth = 1) +
+  geom_abline(linetype = "dashed", color = "red") +
+  labs(title = "Krzywa ROC QDA po normalizacji", x = "False Positive Rate (FPR)", y = "True Positive Rate (TPR)") +
+  theme_minimal()
+
+```
+
+AUC (pole pod wykresem ROC QDA po normalizacji): 0.8517.
+
+```{r}
+# Obliczenie AUC
+auc_value <- auc(roc_obj)
+print(paste("AUC (pole pod wykresem ROC QDA po normalizacji):", auc_value))
+```
+
+## 3.4 Bagging 
+
+Kolejnym modelem jest bagging. Budujemy model. Tworzymy tablicę kontyngencji. Prawidłowo kwalifikował 130 obserwacji, a nieprawidłowo 32.
+
+```{r}
+#BAGGING
+bag.ami <- randomForest(AMI ~ . , data = dane, subset = train_sample,  mtry = 7, importance = TRUE)
+bag.ami
+
+yhat.bag <- predict(bag.ami, newdata = dane[-train_sample,])
+dane.test <- dane[-train_sample, "AMI"]
+
+```
+
+```{r}
+#tablica kontyngencji
+table(yhat.bag, dane.test)
+#dokładność modelu
+mean(yhat.bag == dane.test)
+```
+
+Dokładność modelu wynosi: 0.8025.
+
+```{r}
+# ROC/AUC
+yhat.bag_prob <- predict(bag.ami, newdata = dane[-train_sample,], type = "prob")[,2]
+dane.test.num <- as.numeric(as.character(dane.test))
+# Dane do wykresu
+roc_obj <- roc(dane.test.num, yhat.bag_prob)
+roc_data <- data.frame(
+  TPR = roc_obj$sensitivities,   # True Positive Rate
+  FPR = 1 - roc_obj$specificities # False Positive Rate
+)
+
+# Rysowanie wykresu
+ggplot(roc_data, aes(x = FPR, y = TPR)) +
+  geom_line(color = "blue", linewidth = 1) +
+  geom_abline(linetype = "dashed", color = "red") +
+  labs(title = "Krzywa ROC BAGGING", x = "False Positive Rate (FPR)", y = "True Positive Rate (TPR)") +
+  theme_minimal()
+```
+
+Obliczamy AUC (pole pod wykresem ROC BAGGING): 0.8809.
+
+```{r}
+# Obliczenie AUC
+auc_value <- auc(roc_obj)
+print(paste("AUC (pole pod wykresem ROC BAGGING):", auc_value))
+```
+
+## 3.5. Random forest 
+
+Następnym modelem jest random forest, czyli lasy losowe. Budujemy model. Tworzymy tablicę kontyngencji. Prawidłowo zakwalifikował 130 obserwacji, a nieprawidłowo 32.
+
+```{r}
+#RANDOM FOREST
+rf.ami<- randomForest(AMI ~ ., data = dane, subset = train_sample,
+                          mtry = 3, importance = TRUE)
+yhat.rf <- predict(rf.ami, newdata = dane[-train_sample,])
+
+#tablica kontyngencji
+table(yhat.rf, dane.test)
+#dokładność modelu
+mean(yhat.rf == dane.test)
+```
+
+Dokładność modelu wynosi: 0.8024.
+
+Za pomocą funkcji importance() otrzymaliśmy wykres, który przedstawia jak bardzo zmienna jest znacząca dla modelu.
+
+```{r}
+#wykres przedstawiający jak bardzo zmienne są znaczące
+importance(rf.ami)
+varImpPlot(rf.ami)
+```
+
+Jak pokazują miary MDA i MDG, najbardziej znaczącą zmienną jest WBC, kolejne to LY oraz MO, natomiast najmniejszy wpływ mają zmienne HGB i SEX.
+
+Tworzymy krzywą ROC.
+
+```{r}
+yhat.rf_prob <- predict(rf.ami, newdata = dane[-train_sample,], type = "prob")[,2]
+dane.test.num <- as.numeric(as.character(dane.test))
+# Dane do wykresu
+roc_obj <- roc(dane.test.num, yhat.rf_prob)
+roc_data <- data.frame(
+  TPR = roc_obj$sensitivities,   # True Positive Rate
+  FPR = 1 - roc_obj$specificities # False Positive Rate
+)
+
+# Rysowanie wykresu
+ggplot(roc_data, aes(x = FPR, y = TPR)) +
+  geom_line(color = "blue", linewidth = 1) +
+  geom_abline(linetype = "dashed", color = "red") +
+  labs(title = "Krzywa ROC RANDOM FOREST", x = "False Positive Rate (FPR)", y = "True Positive Rate (TPR)") +
+  theme_minimal()
+```
+
+Obliczamy AUC (pole pod wykresem ROC RANDOM FOREST): 0.8933.
+
+```{r}
+# Obliczenie AUC
+auc_value <- auc(roc_obj)
+print(paste("AUC (pole pod wykresem ROC RANDOM FOREST):", auc_value))
+```
